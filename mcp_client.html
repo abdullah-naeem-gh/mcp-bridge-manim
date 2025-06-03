@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Manim MCP Client</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+            border-bottom: 2px solid #333;
+            padding-bottom: 10px;
+        }
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        .panel {
+            background-color: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        textarea {
+            width: 100%;
+            height: 300px;
+            font-family: monospace;
+            margin-bottom: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            padding: 8px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-right: 10px;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        #console {
+            background-color: #333;
+            color: #f0f0f0;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            height: 200px;
+            overflow-y: auto;
+            margin-top: 10px;
+        }
+        .result-container {
+            margin-top: 20px;
+        }
+        #animation-result {
+            width: 100%;
+            margin-top: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .console-entry {
+            margin-bottom: 5px;
+            border-bottom: 1px solid #555;
+            padding-bottom: 5px;
+        }
+        .error {
+            color: #ff6b6b;
+        }
+        .success {
+            color: #69db7c;
+        }
+    </style>
+</head>
+<body>
+    <h1>Manim MCP Client</h1>
+    
+    <div class="container">
+        <div class="panel">
+            <h2>Create Manim Script</h2>
+            <textarea id="script-editor">from manim import *
+
+class ExampleScene(Scene):
+    def construct(self):
+        # Create a circle
+        circle = Circle(radius=2.0, color=BLUE)
+        
+        # Add the circle to the scene
+        self.play(Create(circle))
+        
+        # Wait for a moment
+        self.wait(1)
+        
+        # Transform the circle into a square
+        square = Square(side_length=4.0, color=RED)
+        self.play(Transform(circle, square))
+        
+        # Wait for another moment
+        self.wait(1)
+        
+        # Add some text
+        text = Text("Hello, Manim!", font_size=36)
+        self.play(Write(text))
+        
+        # Final pause
+        self.wait(2)</textarea>
+            <div>
+                <label for="scene-name">Scene Name:</label>
+                <input type="text" id="scene-name" value="ExampleScene">
+                
+                <label for="quality">Quality:</label>
+                <select id="quality">
+                    <option value="low_quality">Low (fast)</option>
+                    <option value="medium_quality">Medium</option>
+                    <option value="high_quality">High</option>
+                    <option value="production_quality">Production</option>
+                </select>
+            </div>
+            <div style="margin-top: 10px;">
+                <button id="run-btn">Run Animation</button>
+                <button id="clear-btn">Clear Console</button>
+            </div>
+            <div id="console"></div>
+        </div>
+        
+        <div class="panel">
+            <h2>Animation Result</h2>
+            <div id="result-status">No animation has been rendered yet.</div>
+            <div class="result-container">
+                <video id="animation-result" controls style="display: none;"></video>
+                <img id="image-result" style="display: none; max-width: 100%;">
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const serverUrl = 'http://localhost:8002';
+        const scriptEditor = document.getElementById('script-editor');
+        const sceneNameInput = document.getElementById('scene-name');
+        const qualitySelect = document.getElementById('quality');
+        const runButton = document.getElementById('run-btn');
+        const clearButton = document.getElementById('clear-btn');
+        const consoleOutput = document.getElementById('console');
+        const resultStatus = document.getElementById('result-status');
+        const videoResult = document.getElementById('animation-result');
+        const imageResult = document.getElementById('image-result');
+
+        function logToConsole(message, type = 'info') {
+            const entry = document.createElement('div');
+            entry.className = `console-entry ${type}`;
+            entry.textContent = message;
+            consoleOutput.appendChild(entry);
+            consoleOutput.scrollTop = consoleOutput.scrollHeight;
+        }
+
+        async function callMcpTool(toolName, arguments) {
+            try {
+                logToConsole(`Calling ${toolName}...`);
+                
+                const response = await fetch(`${serverUrl}/mcp/tools/call`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        tool_name: toolName,
+                        arguments: arguments
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                
+                if (data.error) {
+                    logToConsole(`Error from ${toolName}: ${JSON.stringify(data.error)}`, 'error');
+                    return null;
+                }
+                
+                if (data.result && data.result.content) {
+                    logToConsole(`${toolName} completed successfully`, 'success');
+                    return data.result.content[0].text;
+                } else {
+                    logToConsole(`${toolName} response: ${JSON.stringify(data)}`, 'success');
+                    return data;
+                }
+            } catch (error) {
+                logToConsole(`Error calling ${toolName}: ${error.message}`, 'error');
+                return null;
+            }
+        }
+
+        async function renderAnimation() {
+            const scriptContent = scriptEditor.value;
+            const sceneName = sceneNameInput.value;
+            const quality = qualitySelect.value;
+            
+            if (!scriptContent || !sceneName) {
+                logToConsole('Please provide both script content and scene name', 'error');
+                return;
+            }
+
+            // Step 1: Save the script
+            resultStatus.textContent = 'Saving script...';
+            const writeResult = await callMcpTool('write_manim_script', {
+                content: scriptContent,
+                filename: 'web_client_script.py'
+            });
+            
+            if (!writeResult) {
+                resultStatus.textContent = 'Failed to save script.';
+                return;
+            }
+            
+            logToConsole(`Script saved: ${writeResult}`);
+            
+            // Step 2: Render the animation
+            resultStatus.textContent = 'Rendering animation... This may take a while.';
+            const renderResult = await callMcpTool('render_manim_animation', {
+                scene_name: sceneName,
+                filepath: '/temp/web_client_script.py',
+                quality: quality
+            });
+            
+            if (!renderResult) {
+                resultStatus.textContent = 'Failed to render animation.';
+                return;
+            }
+
+            logToConsole(`Render result: ${renderResult}`);
+            
+            // Extract job ID from the result
+            const jobIdMatch = renderResult.match(/Job ID: ([a-f0-9-]+)/);
+            if (!jobIdMatch) {
+                resultStatus.textContent = 'Could not find job ID in render result.';
+                logToConsole('Could not extract job ID from render result', 'error');
+                return;
+            }
+            
+            const jobId = jobIdMatch[1];
+            logToConsole(`Found job ID: ${jobId}`);
+            
+            // Step 3: Get the animation result
+            resultStatus.textContent = `Getting results for job ${jobId}...`;
+            
+            const animationResult = await callMcpTool('get_animation_result', { 
+                job_id: jobId 
+            });
+            
+            if (!animationResult) {
+                resultStatus.textContent = 'Failed to get animation result.';
+                return;
+            }
+
+            logToConsole(`Animation result: ${animationResult}`);
+            resultStatus.textContent = 'Animation rendered successfully!';
+            
+            // Try to find video/image files in the result
+            const fileMatch = animationResult.match(/- ([^(]+\.(?:mp4|png|gif))/);
+            if (fileMatch) {
+                const filename = fileMatch[1].trim();
+                logToConsole(`Found animation file: ${filename}`, 'success');
+                
+                // Display the video in the browser
+                if (filename.endsWith('.mp4')) {
+                    videoResult.innerHTML = `
+                        <h3>Animation Result:</h3>
+                        <video controls width="100%" style="max-width: 600px;">
+                            <source src="${serverUrl}/video/${filename}" type="video/mp4">
+                            Your browser does not support the video tag.
+                        </video>
+                        <p>File: ${filename}</p>
+                    `;
+                    videoResult.style.display = 'block';
+                } else {
+                    // For images
+                    imageResult.innerHTML = `
+                        <h3>Animation Result:</h3>
+                        <img src="${serverUrl}/output/${filename}" alt="Animation Result" style="max-width: 100%;">
+                        <p>File: ${filename}</p>
+                    `;
+                    imageResult.style.display = 'block';
+                }
+                
+                resultStatus.textContent = `Animation complete! File: ${filename}`;
+            }
+        }
+
+        // Test connection to the bridge server
+        async function testConnection() {
+            try {
+                const response = await fetch(`${serverUrl}/mcp/tools/list`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    logToConsole(`Connected to MCP server. Available tools: ${data.result?.tools?.length || 0}`, 'success');
+                    
+                    // Show available tools
+                    if (data.result?.tools) {
+                        data.result.tools.forEach(tool => {
+                            logToConsole(`- ${tool.name}: ${tool.description}`, 'info');
+                        });
+                    }
+                } else {
+                    logToConsole(`Failed to connect to MCP bridge: ${response.status}`, 'error');
+                }
+            } catch (error) {
+                logToConsole(`Connection error: ${error.message}`, 'error');
+                logToConsole('Make sure the MCP bridge is running: python3 mcp_bridge.py', 'error');
+            }
+        }
+
+        runButton.addEventListener('click', renderAnimation);
+        
+        clearButton.addEventListener('click', () => {
+            consoleOutput.innerHTML = '';
+        });
+        
+        // Test connection on page load
+        window.addEventListener('load', () => {
+            logToConsole('Manim MCP Web Client loaded', 'info');
+            logToConsole('Testing connection to MCP bridge...', 'info');
+            testConnection();
+        });
+    </script>
+</body>
+</html>
