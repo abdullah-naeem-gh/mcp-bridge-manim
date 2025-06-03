@@ -10,7 +10,7 @@ import sys
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from typing import Dict, Any, Optional
 import uuid
@@ -34,13 +34,29 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Add CORS middleware
+# Add CORS middleware with proper video file support
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # In production, specify your domain
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "*",
+        "Accept",
+        "Accept-Language",
+        "Content-Language",
+        "Content-Type",
+        "Range",  # Important for video streaming
+        "Authorization",
+        "Cache-Control",
+        "Pragma"
+    ],
+    expose_headers=[
+        "Content-Range",
+        "Accept-Ranges", 
+        "Content-Length",
+        "Content-Type"
+    ]
 )
 
 # Serve the HTML client
@@ -51,11 +67,144 @@ async def serve_client():
 # Serve video files from output directory
 @app.get("/video/{filename}")
 async def serve_video(filename: str):
-    """Serve video files from the output directory"""
-    video_path = os.path.join("output", filename)
-    if not os.path.exists(video_path):
-        raise HTTPException(status_code=404, detail="Video file not found")
-    return FileResponse(video_path, media_type="video/mp4")
+    """Serve video files from the output directory with proper CORS headers"""
+    import mimetypes
+    from fastapi.responses import StreamingResponse
+    from fastapi import Request
+    
+    # Clean the filename to prevent path traversal
+    filename = os.path.basename(filename)
+    
+    # Try multiple possible locations for the video file
+    possible_paths = [
+        os.path.join("output", filename),
+        os.path.join("output", f"{filename}.mp4") if not filename.endswith('.mp4') else os.path.join("output", filename),
+    ]
+    
+    video_path = None
+    for path in possible_paths:
+        if os.path.exists(path) and os.path.isfile(path):
+            video_path = path
+            break
+    
+    if not video_path:
+        # Also check in subdirectories of output
+        output_dir = "output"
+        if os.path.exists(output_dir):
+            for root, dirs, files in os.walk(output_dir):
+                for file in files:
+                    if (file == filename or file == f"{filename}.mp4") and file.endswith('.mp4'):
+                        video_path = os.path.join(root, file)
+                        break
+                if video_path:
+                    break
+    
+    if not video_path or not os.path.exists(video_path):
+        print(f"Video file not found: {filename}")
+        print(f"Checked paths: {possible_paths}")
+        print(f"Output directory contents: {os.listdir('output') if os.path.exists('output') else 'Output dir not found'}")
+        raise HTTPException(status_code=404, detail=f"Video file not found: {filename}")
+    
+    print(f"Serving video file: {video_path}")
+    
+    # Get MIME type
+    mime_type, _ = mimetypes.guess_type(video_path)
+    if not mime_type:
+        mime_type = "video/mp4"
+    
+    return FileResponse(
+        video_path, 
+        media_type=mime_type,
+        headers={
+            "Accept-Ranges": "bytes",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Range, Content-Type, Authorization",
+            "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
+            "Cache-Control": "public, max-age=3600"
+        }
+    )
+
+# Serve files from output directory with better path handling
+@app.get("/output/{file_path:path}")
+async def serve_output_file(file_path: str):
+    """Serve any file from the output directory with proper CORS headers"""
+    import mimetypes
+    
+    # Clean the file path to prevent path traversal
+    file_path = os.path.normpath(file_path).lstrip('/')
+    full_path = os.path.join("output", file_path)
+    
+    # Security check
+    if not full_path.startswith(os.path.abspath("output")):
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    if not os.path.exists(full_path) or not os.path.isfile(full_path):
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+    
+    # Get MIME type
+    mime_type, _ = mimetypes.guess_type(full_path)
+    if not mime_type:
+        if file_path.endswith('.mp4'):
+            mime_type = "video/mp4"
+        elif file_path.endswith('.png'):
+            mime_type = "image/png"
+        elif file_path.endswith('.gif'):
+            mime_type = "image/gif"
+        else:
+            mime_type = "application/octet-stream"
+    
+    return FileResponse(
+        full_path,
+        media_type=mime_type,
+        headers={
+            "Accept-Ranges": "bytes",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Range, Content-Type",
+            "Cache-Control": "public, max-age=3600"
+        }
+    )
+
+# Handle OPTIONS preflight requests for CORS
+@app.options("/{path:path}")
+async def options_handler(path: str):
+    """Handle OPTIONS preflight requests for CORS"""
+    return {
+        "message": "OK",
+        "headers": {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "Range, Content-Type, Authorization, Accept",
+            "Access-Control-Max-Age": "86400"
+        }
+    }
+
+# Debug endpoint to list available videos
+@app.get("/debug/videos")
+async def list_available_videos():
+    """List all available video files for debugging"""
+    videos = []
+    output_dir = "output"
+    
+    if os.path.exists(output_dir):
+        for root, dirs, files in os.walk(output_dir):
+            for file in files:
+                if file.endswith(('.mp4', '.png', '.gif')):
+                    rel_path = os.path.relpath(os.path.join(root, file), output_dir)
+                    videos.append({
+                        "filename": file,
+                        "relative_path": rel_path,
+                        "full_path": os.path.join(root, file),
+                        "video_url": f"/video/{file}",
+                        "output_url": f"/output/{rel_path}"
+                    })
+    
+    return {
+        "total_files": len(videos),
+        "files": videos,
+        "output_directory": os.path.abspath(output_dir) if os.path.exists(output_dir) else "Not found"
+    }
 
 # Mount static files
 app.mount("/static", StaticFiles(directory="."), name="static")

@@ -215,90 +215,167 @@ class ExampleScene(Scene):
                 return;
             }
 
-            // Step 1: Save the script
-            resultStatus.textContent = 'Saving script...';
-            const writeResult = await callMcpTool('write_manim_script', {
-                content: scriptContent,
-                filename: 'web_client_script.py'
-            });
-            
-            if (!writeResult) {
-                resultStatus.textContent = 'Failed to save script.';
-                return;
-            }
-            
-            logToConsole(`Script saved: ${writeResult}`);
-            
-            // Step 2: Render the animation
-            resultStatus.textContent = 'Rendering animation... This may take a while.';
-            const renderResult = await callMcpTool('render_manim_animation', {
-                scene_name: sceneName,
-                filepath: '/temp/web_client_script.py',
-                quality: quality
-            });
-            
-            if (!renderResult) {
-                resultStatus.textContent = 'Failed to render animation.';
-                return;
-            }
+            runButton.disabled = true;
+            runButton.textContent = 'Rendering...';
 
-            logToConsole(`Render result: ${renderResult}`);
-            
-            // Extract job ID from the result
-            const jobIdMatch = renderResult.match(/Job ID: ([a-f0-9-]+)/);
-            if (!jobIdMatch) {
-                resultStatus.textContent = 'Could not find job ID in render result.';
-                logToConsole('Could not extract job ID from render result', 'error');
-                return;
-            }
-            
-            const jobId = jobIdMatch[1];
-            logToConsole(`Found job ID: ${jobId}`);
-            
-            // Step 3: Get the animation result
-            resultStatus.textContent = `Getting results for job ${jobId}...`;
-            
-            const animationResult = await callMcpTool('get_animation_result', { 
-                job_id: jobId 
-            });
-            
-            if (!animationResult) {
-                resultStatus.textContent = 'Failed to get animation result.';
-                return;
-            }
-
-            logToConsole(`Animation result: ${animationResult}`);
-            resultStatus.textContent = 'Animation rendered successfully!';
-            
-            // Try to find video/image files in the result
-            const fileMatch = animationResult.match(/- ([^(]+\.(?:mp4|png|gif))/);
-            if (fileMatch) {
-                const filename = fileMatch[1].trim();
-                logToConsole(`Found animation file: ${filename}`, 'success');
+            try {
+                // Step 1: Save the script
+                resultStatus.textContent = 'Saving script...';
+                logToConsole('Writing script to server...');
                 
-                // Display the video in the browser
-                if (filename.endsWith('.mp4')) {
-                    videoResult.innerHTML = `
-                        <h3>Animation Result:</h3>
-                        <video controls width="100%" style="max-width: 600px;">
-                            <source src="${serverUrl}/video/${filename}" type="video/mp4">
-                            Your browser does not support the video tag.
-                        </video>
-                        <p>File: ${filename}</p>
-                    `;
-                    videoResult.style.display = 'block';
-                } else {
-                    // For images
-                    imageResult.innerHTML = `
-                        <h3>Animation Result:</h3>
-                        <img src="${serverUrl}/output/${filename}" alt="Animation Result" style="max-width: 100%;">
-                        <p>File: ${filename}</p>
-                    `;
-                    imageResult.style.display = 'block';
+                const writeResult = await callMcpTool('write_manim_script', {
+                    content: scriptContent,
+                    filename: 'web_client_script.py'
+                });
+                
+                if (!writeResult) {
+                    resultStatus.textContent = 'Failed to save script.';
+                    return;
                 }
                 
-                resultStatus.textContent = `Animation complete! File: ${filename}`;
+                logToConsole(`Script saved: ${writeResult.substring(0, 100)}...`);
+                
+                // Step 2: Render the animation
+                resultStatus.textContent = 'Rendering animation... This may take a while.';
+                logToConsole('Running Manim to render animation...');
+                
+                const renderResult = await callMcpTool('render_manim_animation', {
+                    scene_name: sceneName,
+                    filepath: '/temp/web_client_script.py',
+                    quality: quality
+                });
+                
+                if (!renderResult) {
+                    resultStatus.textContent = 'Failed to render animation.';
+                    return;
+                }
+
+                logToConsole(`Render response: ${renderResult.substring(0, 200)}...`);
+                
+                // Extract job ID from the result
+                const jobIdMatch = renderResult.match(/Job ID: ([a-f0-9-]+)/);
+                if (!jobIdMatch) {
+                    resultStatus.textContent = 'Could not find job ID in render result.';
+                    logToConsole('Could not extract job ID from render result', 'error');
+                    logToConsole(renderResult, 'error');
+                    return;
+                }
+                
+                const jobId = jobIdMatch[1];
+                logToConsole(`Animation rendered successfully. Job ID: ${jobId}`, 'success');
+                
+                // Step 3: Get the animation result
+                resultStatus.textContent = `Retrieving video URL...`;
+                logToConsole('Retrieving video URL...');
+                
+                const animationResult = await callMcpTool('get_animation_result', { 
+                    job_id: jobId 
+                });
+                
+                if (!animationResult) {
+                    resultStatus.textContent = 'Failed to get animation result.';
+                    logToConsole(`Animation result response: No animation files found for job ID: ${jobId}`, 'error');
+                    
+                    // Fallback: Try to construct URL directly
+                    logToConsole(`Using fallback URL construction with job ID: ${jobId}`);
+                    const fallbackUrl = `${serverUrl}/video/${jobId}.mp4`;
+                    await displayVideo(fallbackUrl, jobId);
+                    return;
+                }
+
+                logToConsole(`Animation result response: ${animationResult.substring(0, 100)}...`);
+                resultStatus.textContent = 'Animation rendered successfully!';
+                
+                // Try to find video files in the result
+                const videoUrl = `${serverUrl}/video/${jobId}.mp4`;
+                logToConsole(`Video URL retrieved: ${videoUrl}`);
+                
+                await displayVideo(videoUrl, jobId);
+                
+            } catch (error) {
+                logToConsole(`Error during rendering: ${error.message}`, 'error');
+                resultStatus.textContent = `Error: ${error.message}`;
+            } finally {
+                runButton.disabled = false;
+                runButton.textContent = 'Run Animation';
             }
+        }
+
+        async function displayVideo(videoUrl, jobId) {
+            logToConsole(`Video URL in player: ${videoUrl}`);
+            
+            // Create video element with better error handling
+            const videoHTML = `
+                <h3>Animation Result (Job ID: ${jobId}):</h3>
+                <video id="result-video" controls width="100%" style="max-width: 600px;" crossorigin="anonymous">
+                    <source src="${videoUrl}" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+                <div style="margin-top: 10px;">
+                    <p><strong>Video URL:</strong> <a href="${videoUrl}" target="_blank">${videoUrl}</a></p>
+                    <p><strong>Job ID:</strong> ${jobId}</p>
+                    <button onclick="testVideoUrl('${videoUrl}')">Test Video URL</button>
+                </div>
+            `;
+            
+            videoResult.innerHTML = videoHTML;
+            videoResult.style.display = 'block';
+            imageResult.style.display = 'none';
+            
+            // Add event listeners to the video element
+            const video = document.getElementById('result-video');
+            if (video) {
+                video.addEventListener('loadstart', () => {
+                    logToConsole('Video loading started');
+                });
+                
+                video.addEventListener('loadeddata', () => {
+                    logToConsole('Video loaded successfully', 'success');
+                    resultStatus.textContent = `Animation complete! Video loaded successfully.`;
+                });
+                
+                video.addEventListener('error', (e) => {
+                    logToConsole(`Video player error: ${JSON.stringify(e)}`, 'error');
+                    logToConsole(`Video source that failed: ${videoUrl}`, 'error');
+                    if (video.error) {
+                        logToConsole(`Video element error: ${JSON.stringify(video.error)}`, 'error');
+                        logToConsole(`${video.error.message}`, 'error');
+                    }
+                    
+                    // Try to fetch the video as a blob to get better error info
+                    fetchVideoAsBlob(videoUrl);
+                });
+            }
+        }
+
+        async function fetchVideoAsBlob(url) {
+            try {
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                const blob = await response.blob();
+                logToConsole(`Video blob fetched successfully: ${blob.size} bytes, type: ${blob.type}`, 'success');
+            } catch (error) {
+                logToConsole(`Failed to fetch video as blob: ${error}`, 'error');
+            }
+        }
+
+        function testVideoUrl(url) {
+            logToConsole(`Testing video URL: ${url}`);
+            fetch(url, { method: 'HEAD' })
+                .then(response => {
+                    if (response.ok) {
+                        logToConsole(`✅ Video URL is accessible (${response.status})`, 'success');
+                        logToConsole(`Content-Type: ${response.headers.get('content-type')}`, 'info');
+                        logToConsole(`Content-Length: ${response.headers.get('content-length')} bytes`, 'info');
+                    } else {
+                        logToConsole(`❌ Video URL returned ${response.status}: ${response.statusText}`, 'error');
+                    }
+                })
+                .catch(error => {
+                    logToConsole(`❌ Failed to test video URL: ${error.message}`, 'error');
+                });
         }
 
         // Test connection to the bridge server

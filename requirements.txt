@@ -1,0 +1,42 @@
+# Manim MCP Server Requirements
+# ================================
+
+# Core MCP (Model Context Protocol) dependencies
+mcp>=1.0.0
+
+# Manim - Mathematical animation engine
+manim>=0.18.0
+
+# FastAPI and web server dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# HTTP client library for testing
+requests>=2.31.0
+
+# Type hints and annotations
+typing-extensions>=4.8.0
+
+# JSON and data processing
+pydantic>=2.4.0
+
+# Standard library enhancements (usually included but listed for clarity)
+pathlib>=1.0.1
+
+# Optional: Development and testing dependencies
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+
+# Optional: Jupyter notebook support (if using notebook features)
+jupyter>=1.0.0
+ipykernel>=6.25.0
+
+# Optional: Additional Manim dependencies that might be needed
+pillow>=10.0.0
+scipy>=1.11.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+
+# Optional: Better error handling and debugging
+rich>=13.5.0

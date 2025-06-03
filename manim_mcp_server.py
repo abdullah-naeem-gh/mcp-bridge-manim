@@ -174,14 +174,23 @@ def render_manim_animation(
     # Generate a unique job ID
     job_id = str(uuid.uuid4())
     
-    # Prepare output directory
+    # Set up output file path directly
     if RUNNING_IN_DOCKER:
-        output_dir = f"/manim/output/{job_id}"
+        output_file = f"/manim/output/{job_id}.mp4"
     else:
-        output_dir = os.path.join(PROJECT_ROOT, "output", job_id)
-    os.makedirs(output_dir, exist_ok=True)
+        output_file = os.path.join(PROJECT_ROOT, "output", f"{job_id}.mp4")
     
-    # Build the command
+    # Build the command - use full path to python and manim
+    # First check if manim is available
+    try:
+        # Try to find manim installation
+        result = subprocess.run(["python3", "-c", "import manim; print(manim.__file__)"], 
+                              capture_output=True, text=True)
+        if result.returncode != 0:
+            return f"Error: Manim is not installed. Please install with: pip install manim"
+    except Exception as e:
+        return f"Error: Cannot check Manim installation: {str(e)}"
+    
     cmd = ["python3", "-m", "manim"]
     
     # Add quality flag
@@ -196,8 +205,16 @@ def render_manim_animation(
     else:
         return f"Error: Unknown quality level: {quality}"
     
-    # Add output directory
-    cmd.extend(["--output_file", output_dir])
+    # Create output directory if it doesn't exist
+    output_dir = os.path.dirname(output_file)
+    if not os.path.exists(output_dir):
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except Exception as e:
+            return f"Error: Failed to create output directory {output_dir}: {str(e)}"
+    
+    # Don't use --output_file for now, let Manim use its default output structure
+    # Instead we'll move the file after rendering
     
     # Add the file path and scene name
     cmd.append(filepath)
@@ -209,14 +226,55 @@ def render_manim_animation(
             cmd,
             capture_output=True,
             text=True,
-            check=True
+            timeout=300  # 5 minute timeout
         )
         
-        # Check for files in the output directory
+        # Manim creates files in a specific directory structure
+        # media/videos/{script_name}/{quality}/{scene_name}.mp4
+        script_name = os.path.splitext(os.path.basename(filepath))[0]
+        
+        # Map quality to Manim's output directory names
+        quality_map = {
+            "low_quality": "480p15",
+            "medium_quality": "720p30", 
+            "high_quality": "1080p60",
+            "production_quality": "2160p60"
+        }
+        quality_dir = quality_map.get(quality, "480p15")
+        
+        # Look for the rendered file in Manim's output structure
+        manim_output_path = os.path.join(PROJECT_ROOT, "media", "videos", script_name, quality_dir, f"{scene_name}.mp4")
+        
         files = []
-        if os.path.exists(output_dir):
-            dir_files = [f for f in os.listdir(output_dir) if os.path.isfile(os.path.join(output_dir, f))]
-            files.extend(dir_files)
+        actual_output_file = None
+        
+        # Check if the expected file exists
+        if os.path.exists(manim_output_path):
+            # Copy the file to our output directory with the job ID
+            import shutil
+            try:
+                shutil.copy2(manim_output_path, output_file)
+                files.append(os.path.basename(output_file))
+                actual_output_file = output_file
+            except Exception as e:
+                return f"Error copying rendered file: {str(e)}"
+        else:
+            # Look for any mp4 files in the media directory that might have been created
+            media_dir = os.path.join(PROJECT_ROOT, "media", "videos")
+            if os.path.exists(media_dir):
+                for root, dirs, media_files in os.walk(media_dir):
+                    for file in media_files:
+                        if file.endswith('.mp4') and scene_name in file:
+                            source_path = os.path.join(root, file)
+                            # Copy to our output directory
+                            try:
+                                import shutil
+                                shutil.copy2(source_path, output_file)
+                                files.append(os.path.basename(output_file))
+                                actual_output_file = output_file
+                                break
+                            except Exception as e:
+                                continue
         
         # Also check for files in main output directory with job_id in name
         main_output_dir = os.path.join(PROJECT_ROOT, "output") if not RUNNING_IN_DOCKER else "/manim/output"
@@ -230,19 +288,39 @@ def render_manim_animation(
             f"Animation rendered successfully! Job ID: {job_id}",
             f"Command used: {' '.join(cmd)}",
             f"Scene: {scene_name}",
-            f"Files generated: {len(files)}",
+            f"Return code: {result.returncode}",
             ""
         ]
         
-        # Include file info
-        for file in files:
-            response.append(f"- {file}")
+        if result.returncode == 0:
+            response.append("✅ Rendering completed successfully")
+            if actual_output_file and os.path.exists(actual_output_file):
+                response.append(f"✅ Output file created: {actual_output_file}")
+            response.append(f"Files generated: {len(files)}")
+            
+            # Include file info
+            for file in files:
+                response.append(f"- {file}")
+            
+            # Include stdout if available
+            if result.stdout:
+                response.append("")
+                response.append("Manim output:")
+                response.append(result.stdout[-1000:])  # Last 1000 chars
+        else:
+            response.append("❌ Rendering failed")
+            if result.stderr:
+                response.append("")
+                response.append("Error details:")
+                response.append(result.stderr[-1000:])  # Last 1000 chars
         
         response.append("")
         response.append(f"To view your animation, use the get_animation_result tool with job_id: {job_id}")
         
         return "\n".join(response)
     
+    except subprocess.TimeoutExpired:
+        return f"Error: Rendering timed out after 5 minutes. The animation may be too complex."
     except subprocess.CalledProcessError as e:
         return f"""Error rendering animation:
 Command: {' '.join(cmd)}
@@ -251,6 +329,8 @@ Error output:
 {e.stderr}
 
 Make sure the scene name exists in the file and check your Manim code for errors."""
+    except Exception as e:
+        return f"Unexpected error during rendering: {str(e)}"
 
 @mcp.tool()
 def get_animation_result(
@@ -391,6 +471,34 @@ class ExampleScene(Scene):
 
 For more information about Manim, visit: https://www.manim.community/
 """
+
+@mcp.tool()
+def get_video_url(
+    job_id: Annotated[str, {"description": "The job ID returned from the render_manim_animation function"}]
+) -> str:
+    """Get the direct URL to access a rendered video file"""
+    
+    # Define the output directories to check
+    if RUNNING_IN_DOCKER:
+        main_output_dir = "/manim/output"
+    else:
+        main_output_dir = os.path.join(PROJECT_ROOT, "output")
+    
+    video_file = None
+    
+    # Check for the video file with job_id in the name
+    if os.path.exists(main_output_dir):
+        main_files = [f for f in os.listdir(main_output_dir) 
+                     if os.path.isfile(os.path.join(main_output_dir, f)) and job_id in f and f.endswith('.mp4')]
+        if main_files:
+            video_file = main_files[0]
+    
+    if video_file:
+        # Return the HTTP URL that can be used to access the video
+        video_url = f"http://localhost:8002/video/{video_file}"
+        return f"Video URL: {video_url}\nDirect file path: {os.path.join(main_output_dir, video_file)}"
+    else:
+        return f"No video file found for job ID: {job_id}"
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
