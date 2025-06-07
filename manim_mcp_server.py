@@ -37,6 +37,16 @@ else:
         "/tmp"
     ]
 
+# Define media directory from environment variable or use default
+MEDIA_DIR = os.environ.get("MEDIA_DIR", os.path.join(PROJECT_ROOT, "output"))
+
+# Create media directory if it doesn't exist
+if not os.path.exists(MEDIA_DIR):
+    try:
+        os.makedirs(MEDIA_DIR, exist_ok=True)
+    except Exception:
+        pass  # Will handle errors when actually trying to use the directory
+
 def adjust_path(path):
     """Adjust paths for local vs Docker environment"""
     if not RUNNING_IN_DOCKER and path.startswith('/'):
@@ -53,6 +63,11 @@ def adjust_path(path):
             # Handle paths that start directly with /output/
             return os.path.join(PROJECT_ROOT, 'output', path[8:])
     return path
+
+def get_python_executable():
+    """Get the correct Python executable (virtual env aware)"""
+    import sys
+    return sys.executable
 
 @mcp.tool()
 def list_directories(
@@ -175,25 +190,61 @@ def render_manim_animation(
     job_id = str(uuid.uuid4())
     
     # Set up output file path directly
-    if RUNNING_IN_DOCKER:
-        output_file = f"/manim/output/{job_id}.mp4"
-    else:
-        output_file = os.path.join(PROJECT_ROOT, "output", f"{job_id}.mp4")
+    output_file = os.path.join(MEDIA_DIR, f"{job_id}.mp4")
     
-    # Build the command - use full path to python and manim
-    # First check if manim is available
+    # Get the correct Python executable (virtual env aware)
+    python_executable = get_python_executable()
+    
+    # Check if manim is available using the correct Python
     try:
-        # Try to find manim installation
-        result = subprocess.run(["python3", "-c", "import manim; print(manim.__file__)"], 
+        result = subprocess.run([python_executable, "-c", "import manim; print(manim.__file__)"], 
                               capture_output=True, text=True)
         if result.returncode != 0:
-            return f"Error: Manim is not installed. Please install with: pip install manim"
+            return f"Error: Manim is not installed in the current Python environment. Please install with: pip install manim\nUsing Python: {python_executable}\nError: {result.stderr}"
     except Exception as e:
         return f"Error: Cannot check Manim installation: {str(e)}"
     
-    cmd = ["python3", "-m", "manim"]
+    # Create output directory if it doesn't exist
+    try:
+        os.makedirs(MEDIA_DIR, exist_ok=True)
+    except Exception as e:
+        return f"Error: Failed to create media directory {MEDIA_DIR}: {str(e)}"
     
-    # Add quality flag
+    # Check if the directory is writable
+    if not os.access(MEDIA_DIR, os.W_OK):
+        return f"Error: Media directory {MEDIA_DIR} is not writable"
+    
+    # Create a temporary working directory (manim needs a writable current directory)
+    temp_work_dir = os.path.join(MEDIA_DIR, f"temp_work_{job_id}")
+    try:
+        os.makedirs(temp_work_dir, exist_ok=True)
+    except Exception as e:
+        return f"Error: Failed to create temporary working directory: {str(e)}"
+    
+    # Create a media symlink in the temp directory pointing to our output directory
+    media_link = os.path.join(temp_work_dir, "media")
+    try:
+        # First check if it exists
+        if not os.path.exists(media_link):
+            # Create a symlink on Unix or a directory junction on Windows
+            if os.name == 'nt':  # Windows
+                subprocess.run(['mklink', '/J', media_link, MEDIA_DIR], shell=True, check=False)
+            else:  # Unix/Mac
+                os.symlink(MEDIA_DIR, media_link)
+    except Exception as e:
+        # If symlink fails, try creating a real directory
+        try:
+            os.makedirs(media_link, exist_ok=True)
+        except Exception as inner_e:
+            return f"Error: Could not create media directory or symlink: {str(e)}, {str(inner_e)}"
+    
+    # Build the command with explicit output directory
+    cmd = [python_executable, "-m", "manim"]
+    
+    # Explicitly set the media directory FIRST - this must come before quality flags
+    cmd.append(f"--media_dir={MEDIA_DIR}")
+    
+    # Add quality flag AFTER media_dir
     if quality == "low_quality":
         cmd.append("-ql")
     elif quality == "medium_quality":
@@ -205,33 +256,36 @@ def render_manim_animation(
     else:
         return f"Error: Unknown quality level: {quality}"
     
-    # Create output directory if it doesn't exist
-    output_dir = os.path.dirname(output_file)
-    if not os.path.exists(output_dir):
-        try:
-            os.makedirs(output_dir, exist_ok=True)
-        except Exception as e:
-            return f"Error: Failed to create output directory {output_dir}: {str(e)}"
-    
-    # Don't use --output_file for now, let Manim use its default output structure
-    # Instead we'll move the file after rendering
-    
     # Add the file path and scene name
     cmd.append(filepath)
     cmd.append(scene_name)
     
+    # Debug: Log the exact command that will be executed
+    debug_cmd = ' '.join(cmd)
+    
     try:
-        # Run the command
+        # Save the current directory to return to later
+        original_dir = os.getcwd()
+        
+        # Change to our temporary working directory
+        os.chdir(temp_work_dir)
+        
+        # Create environment variables to influence Manim's behavior
+        env = os.environ.copy()
+        env["MANIM_MEDIA_DIR"] = MEDIA_DIR
+        env["TMPDIR"] = temp_work_dir  # Set temp directory to our writable location
+        
+        # Run the command with the modified environment
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=300  # 5 minute timeout
+            timeout=300,  # 5 minute timeout
+            env=env
         )
         
-        # Manim creates files in a specific directory structure
-        # media/videos/{script_name}/{quality}/{scene_name}.mp4
-        script_name = os.path.splitext(os.path.basename(filepath))[0]
+        # Change back to the original directory
+        os.chdir(original_dir)
         
         # Map quality to Manim's output directory names
         quality_map = {
@@ -242,8 +296,11 @@ def render_manim_animation(
         }
         quality_dir = quality_map.get(quality, "480p15")
         
+        script_name = os.path.splitext(os.path.basename(filepath))[0]
+        
         # Look for the rendered file in Manim's output structure
-        manim_output_path = os.path.join(PROJECT_ROOT, "media", "videos", script_name, quality_dir, f"{scene_name}.mp4")
+        # Now using MEDIA_DIR instead of PROJECT_ROOT/media
+        manim_output_path = os.path.join(MEDIA_DIR, "videos", script_name, quality_dir, f"{scene_name}.mp4")
         
         files = []
         actual_output_file = None
@@ -260,9 +317,9 @@ def render_manim_animation(
                 return f"Error copying rendered file: {str(e)}"
         else:
             # Look for any mp4 files in the media directory that might have been created
-            media_dir = os.path.join(PROJECT_ROOT, "media", "videos")
-            if os.path.exists(media_dir):
-                for root, dirs, media_files in os.walk(media_dir):
+            media_videos_dir = os.path.join(MEDIA_DIR, "videos")
+            if os.path.exists(media_videos_dir):
+                for root, dirs, media_files in os.walk(media_videos_dir):
                     for file in media_files:
                         if file.endswith('.mp4') and scene_name in file:
                             source_path = os.path.join(root, file)
@@ -277,16 +334,17 @@ def render_manim_animation(
                                 continue
         
         # Also check for files in main output directory with job_id in name
-        main_output_dir = os.path.join(PROJECT_ROOT, "output") if not RUNNING_IN_DOCKER else "/manim/output"
-        if os.path.exists(main_output_dir):
-            main_files = [f for f in os.listdir(main_output_dir) 
-                         if os.path.isfile(os.path.join(main_output_dir, f)) and job_id in f]
+        if os.path.exists(MEDIA_DIR):
+            main_files = [f for f in os.listdir(MEDIA_DIR) 
+                         if os.path.isfile(os.path.join(MEDIA_DIR, f)) and job_id in f]
             files.extend(main_files)
         
         # Create response message
         response = [
             f"Animation rendered successfully! Job ID: {job_id}",
-            f"Command used: {' '.join(cmd)}",
+            f"Command used: {debug_cmd}",  # Show the debug command
+            f"Working directory: {temp_work_dir}",
+            f"Media directory: {MEDIA_DIR}",
             f"Scene: {scene_name}",
             f"Return code: {result.returncode}",
             ""

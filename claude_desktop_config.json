@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "manim": {
+      "command": "/Users/abdullahnaeem/Projects/manim-mcp/venv/bin/python3",
+      "args": ["/Users/abdullahnaeem/Projects/manim-mcp/manim_mcp_server.py"],
+      "cwd": "/Users/abdullahnaeem/Projects/manim-mcp",
+      "env": {
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        "MEDIA_DIR": "/Users/abdullahnaeem/Projects/manim-mcp/output"
+      }
+    }
+  }
+}
